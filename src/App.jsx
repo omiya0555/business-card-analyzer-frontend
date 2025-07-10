@@ -37,7 +37,7 @@ function App() {
     setActiveTab('result')
     
     try {
-      const res = await fetch("http://localhost:8000/upload", {
+      const res = await fetch("http://bc-agent-alb-1969379781.ap-northeast-1.elb.amazonaws.com/upload", {
         method: "POST",
         body: formData,
       })
@@ -94,7 +94,7 @@ function App() {
         formData.append("file", blob, "result.png")
 
         try {
-          const uploadRes = await fetch("http://localhost:8000/upload-image", {
+          const uploadRes = await fetch("http://bc-agent-alb-1969379781.ap-northeast-1.elb.amazonaws.com/upload-image", {
             method: "POST",
             body: formData,
           })
