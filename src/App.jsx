@@ -106,14 +106,14 @@ function App() {
               const downloadUrl = uploadData.download_url
               setDownloadUrl(downloadUrl)
 
-              const qrDataUrl = await QRCode.toDataURL(downloadUrl, {
-                width: 256,
-                margin: 2,
-                color: {
+                const qrDataUrl = await QRCode.toDataURL(downloadUrl, {
+                  width: 1024, // Increased size for better viewing on larger displays
+                  margin: 4,
+                  color: {
                   dark: '#000000',
                   light: '#FFFFFF'
-                }
-              })
+                  }
+                })
               
               setQrCodeUrl(qrDataUrl)
             } else {
