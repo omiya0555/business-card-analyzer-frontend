@@ -1,5 +1,7 @@
-import { useState, useRef } from 'react'
-import html2canvas from 'html2canvas'
+import { useState, useRef, useCallback } from 'react'
+import Webcam from 'react-webcam'
+import { jsPDF } from "jspdf";
+import html2canvas from 'html2canvas';
 import QRCode from 'qrcode'
 
 function App() {
@@ -11,8 +13,11 @@ function App() {
   const [qrCodeUrl, setQrCodeUrl] = useState("")
   const [downloadUrl, setDownloadUrl] = useState("")
   const [previewUrl, setPreviewUrl] = useState("")
+  const [showWebcam, setShowWebcam] = useState(false)
+  const [facingMode, setFacingMode] = useState('environment') // 'user' or 'environment'
   const resultRef = useRef(null)
   const fileInputRef = useRef(null)
+  const webcamRef = useRef(null)
 
   const handleFileSelect = (selectedFile) => {
     setFile(selectedFile)
@@ -22,6 +27,31 @@ function App() {
     } else {
       setPreviewUrl("")
     }
+  }
+
+  // Webcamで撮影した画像をBlobに変換してファイルとして設定
+  const capture = useCallback(() => {
+    const imageSrc = webcamRef.current.getScreenshot()
+    if (imageSrc) {
+      // base64をBlobに変換
+      fetch(imageSrc)
+        .then(res => res.blob())
+        .then(blob => {
+          // BlobをFileオブジェクトに変換
+          const file = new File([blob], 'webcam-capture.jpg', { type: 'image/jpeg' })
+          handleFileSelect(file)
+          setShowWebcam(false)
+        })
+        .catch(err => {
+          console.error('Error converting webcam image:', err)
+          alert('撮影した画像の処理に失敗しました')
+        })
+    }
+  }, [webcamRef])
+
+  // カメラの向きを切り替え
+  const switchCamera = () => {
+    setFacingMode(prev => prev === 'user' ? 'environment' : 'user')
   }
 
   const handleUpload = async () => {
@@ -37,7 +67,8 @@ function App() {
     setActiveTab('result')
     
     try {
-      const res = await fetch("https://business-card-analyzer-backend.onrender.com/upload", {
+      //const res = await fetch("https://business-card-analyzer-backend.onrender.com/upload", {
+      const res = await fetch("http://localhost:8000/upload", {
         method: "POST",
         body: formData,
       })
@@ -70,72 +101,121 @@ function App() {
 
   const generateQRCode = async () => {
     if (!response || response.includes("Error")) {
-      return alert("No valid output results available")
+      return alert("No valid output results available");
     }
-
-    setQrLoading(true)
     
+    setQrLoading(true);
+  
     try {
+      // 1️⃣ html2canvasを使用してDOMを画像に変換
       const canvas = await html2canvas(resultRef.current, {
-        backgroundColor: '#1f2937',
         scale: 2,
         useCORS: true,
-        allowTaint: true
-      })
+        allowTaint: true,
+        backgroundColor: "#1f2937",
+        width: 800,
+        height: resultRef.current.scrollHeight,
+        scrollX: 0,
+        scrollY: 0
+      });
 
-      canvas.toBlob(async (blob) => {
-        if (!blob) {
-          alert("Failed to generate image")
-          setQrLoading(false)
-          return
+      // 2️⃣ PDFインスタンス作成
+      const pdf = new jsPDF({
+        orientation: "portrait",
+        unit: "mm",
+        format: "a4"
+      });
+
+      // 3️⃣ キャンバスをPDFに追加
+      const pageWidth = pdf.internal.pageSize.getWidth();
+      const pageHeight = pdf.internal.pageSize.getHeight();
+      const canvasWidth = canvas.width;
+      const canvasHeight = canvas.height;
+      
+      const ratio = Math.min(pageWidth / canvasWidth, pageHeight / canvasHeight);
+      const scaledWidth = canvasWidth * ratio;
+      const scaledHeight = canvasHeight * ratio;
+      
+      const x = (pageWidth - scaledWidth) / 2;
+      const y = 0; // 上部マージン
+
+      pdf.addImage(
+        canvas.toDataURL('image/png'),
+        'PNG',
+        x,
+        y,
+        scaledWidth,
+        scaledHeight
+      );
+
+      const sf = pdf.internal.scaleFactor;              // px -> mm
+      const anchors = resultRef.current.querySelectorAll('a[href]');
+      anchors.forEach(a => {
+        const r = a.getBoundingClientRect();
+        const base = resultRef.current.getBoundingClientRect();
+        const relX = (r.left - base.left) * ratio;
+        const relY = (r.top  - base.top ) * ratio;
+        const w    = r.width  * ratio;
+        const h    = r.height * ratio;
+        pdf.link((x + relX) / sf, (y + relY) / sf, w / sf, h / sf, { url: a.href });
+      });
+
+      // 4️⃣ PDFをBlobとして生成
+      const blob = pdf.output("blob");
+      const formData = new FormData();
+      formData.append("file", blob, "analysis_result.pdf");
+
+      // 5️⃣ アップロード先URLの設定
+      const uploadUrl = window.location.hostname === 'localhost' 
+        ? "http://localhost:8000/upload-image" 
+        : "https://business-card-analyzer-backend.onrender.com/upload-image";
+
+      // 6️⃣ PDFをアップロード
+      const uploadResponse = await fetch(uploadUrl, { 
+        method: "POST", 
+        body: formData 
+      });
+
+      if (!uploadResponse.ok) {
+        const errorText = await uploadResponse.text();
+        throw new Error(`Upload failed: ${uploadResponse.status} - ${errorText}`);
+      }
+
+      const uploadData = await uploadResponse.json();
+      console.log("Upload response:", uploadData);
+      
+      if (!uploadData.success || !uploadData.download_url) {
+        throw new Error("Backend returned invalid response");
+      }
+
+      // 7️⃣ QRコード生成
+      const pdfDownloadUrl = uploadData.download_url;
+      setDownloadUrl(pdfDownloadUrl);
+      
+      const qrCodeDataUrl = await QRCode.toDataURL(pdfDownloadUrl, {
+        width: 256,
+        margin: 2,
+        color: {
+          dark: '#000000',
+          light: '#FFFFFF'
+        },
+        errorCorrectionLevel: 'M',
+        type: 'image/png',
+        quality: 0.92,
+        rendererOpts: {
+          quality: 0.92
         }
+      });
+      
+      setQrCodeUrl(qrCodeDataUrl);
 
-        const formData = new FormData()
-        formData.append("file", blob, "result.png")
-
-        try {
-          const uploadRes = await fetch("https://business-card-analyzer-backend.onrender.com/upload-image", {
-            method: "POST",
-            body: formData,
-          })
-
-          if (uploadRes.ok) {
-            const uploadData = await uploadRes.json()
-            
-            if (uploadData.success) {
-              const downloadUrl = uploadData.download_url
-              setDownloadUrl(downloadUrl)
-
-                const qrDataUrl = await QRCode.toDataURL(downloadUrl, {
-                  width: 1024, // Increased size for better viewing on larger displays
-                  margin: 4,
-                  color: {
-                  dark: '#000000',
-                  light: '#FFFFFF'
-                  }
-                })
-              
-              setQrCodeUrl(qrDataUrl)
-            } else {
-              alert("Failed to upload image")
-            }
-          } else {
-            const errorData = await uploadRes.json()
-            alert(`Error: ${errorData.detail || 'Upload failed'}`)
-          }
-        } catch (uploadErr) {
-          console.error(uploadErr)
-          alert("Error occurred during image upload")
-        }
-      }, 'image/png')
-
-    } catch (err) {
-      console.error(err)
-      alert("Error occurred during image generation")
+    } catch (error) {
+      console.error("PDF/QR generation error:", error);
+      alert("Error during PDF/QR generation: " + error.message);
     } finally {
-      setQrLoading(false)
+      setQrLoading(false);
     }
-  }
+  };
 
   const formatResponse = (text) => {
     let formatted = text;
@@ -256,6 +336,19 @@ function App() {
       transition: 'all 0.2s ease',
       width: '100%'
     },
+    webcamButton: {
+      backgroundColor: '#10b981',
+      color: 'white',
+      border: 'none',
+      padding: '12px 24px',
+      borderRadius: '6px',
+      fontSize: '14px',
+      fontWeight: 500,
+      cursor: 'pointer',
+      transition: 'all 0.2s ease',
+      width: '100%',
+      marginTop: '8px'
+    },
     preview: {
       maxWidth: '100%',
       maxHeight: '300px',
@@ -309,6 +402,54 @@ function App() {
       borderTopColor: '#ffffff',
       animation: 'spin 1s ease-in-out infinite',
       marginRight: '6px'
+    },
+    webcamContainer: {
+      position: 'fixed',
+      top: 0,
+      left: 0,
+      width: '100%',
+      height: '100%',
+      backgroundColor: 'rgba(0, 0, 0, 0.9)',
+      display: 'flex',
+      flexDirection: 'column',
+      justifyContent: 'center',
+      alignItems: 'center',
+      zIndex: 1000
+    },
+    webcamVideo: {
+      width: '90%',
+      maxWidth: '900px',
+      height: 'auto',
+      borderRadius: '8px',
+      border: '2px solid #ef4444'
+    },
+    webcamControls: {
+      marginTop: '20px',
+      display: 'flex',
+      gap: '12px',
+      flexWrap: 'wrap',
+      justifyContent: 'center'
+    },
+    webcamControlButton: {
+      padding: '12px 24px',
+      borderRadius: '6px',
+      border: 'none',
+      fontSize: '14px',
+      fontWeight: 500,
+      cursor: 'pointer',
+      transition: 'all 0.2s ease'
+    },
+    captureButton: {
+      backgroundColor: '#ef4444',
+      color: 'white'
+    },
+    switchButton: {
+      backgroundColor: '#6b7280',
+      color: 'white'
+    },
+    cancelButton: {
+      backgroundColor: '#374151',
+      color: '#d1d5db'
     }
   }
 
@@ -327,6 +468,58 @@ function App() {
           }
         `}
       </style>
+
+      {/* Webcam Modal */}
+      {showWebcam && (
+        <div style={styles.webcamContainer}>
+          <Webcam
+            audio={false}
+            ref={webcamRef}
+            screenshotFormat="image/jpeg"
+            style={styles.webcamVideo}
+            videoConstraints={{
+              facingMode: facingMode
+            }}
+          />
+          <div style={styles.webcamControls}>
+            <button 
+              onClick={capture}
+              style={{
+                ...styles.webcamControlButton,
+                ...styles.captureButton
+              }}
+            >
+              撮影
+            </button>
+            <button 
+              onClick={switchCamera}
+              style={{
+                ...styles.webcamControlButton,
+                ...styles.switchButton
+              }}
+            >
+              カメラ切替
+            </button>
+            <button 
+              onClick={() => setShowWebcam(false)}
+              style={{
+                ...styles.webcamControlButton,
+                ...styles.cancelButton
+              }}
+            >
+              キャンセル
+            </button>
+          </div>
+          <div style={{ 
+            marginTop: '12px', 
+            color: '#9ca3af', 
+            fontSize: '12px',
+            textAlign: 'center'
+          }}>
+            {facingMode === 'environment' ? '背面カメラ' : '前面カメラ'}
+          </div>
+        </div>
+      )}
 
       <div style={styles.header}>
         <div style={styles.tabContainer} className="mobile-stack">
@@ -379,6 +572,15 @@ function App() {
                   }}
                 >
                   Take Photo
+                </button>
+                <button 
+                  style={styles.webcamButton}
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    setShowWebcam(true)
+                  }}
+                >
+                  Webcam
                 </button>
               </div>
             </div>
@@ -528,7 +730,7 @@ function App() {
                   fontWeight: 600,
                   marginBottom: '12px'
                 }}>
-                  QR Code
+                  QR Code for PDF Download
                 </h3>
                 <p style={{ 
                   marginBottom: '16px', 
@@ -536,21 +738,23 @@ function App() {
                   fontSize: '12px',
                   lineHeight: '1.5'
                 }}>
-                  Scan QR code with smartphone to download image
+                  Scan QR code with smartphone to download PDF
                 </p>
                 <div style={{
                   display: 'inline-block',
                   padding: '16px',
                   backgroundColor: '#ffffff',
-                  borderRadius: '6px',
+                  borderRadius: '8px',
                   boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1)'
                 }}>
                   <img 
                     src={qrCodeUrl} 
-                    alt="QR Code" 
+                    alt="QR Code for PDF Download" 
                     style={{ 
                       display: 'block',
-                      borderRadius: '4px'
+                      borderRadius: '4px',
+                      width: '200px',
+                      height: '200px'
                     }} 
                   />
                 </div>
@@ -563,7 +767,7 @@ function App() {
                   borderRadius: '6px',
                   border: '1px solid rgba(59, 130, 246, 0.2)'
                 }}>
-                  <p style={{ fontWeight: 500, marginBottom: '6px' }}>Download URL:</p>
+                  <p style={{ fontWeight: 500, marginBottom: '6px' }}>PDF Download URL:</p>
                   <a 
                     href={downloadUrl} 
                     target="_blank" 
