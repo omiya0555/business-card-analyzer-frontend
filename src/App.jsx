@@ -1,8 +1,7 @@
 import { useState, useRef, useCallback } from 'react'
 import Webcam from 'react-webcam'
-import { jsPDF } from "jspdf";
-import html2canvas from 'html2canvas';
 import QRCode from 'qrcode'
+import html2pdf from 'html2pdf.js';
 
 function App() {
   const [file, setFile] = useState(null)
@@ -14,7 +13,7 @@ function App() {
   const [downloadUrl, setDownloadUrl] = useState("")
   const [previewUrl, setPreviewUrl] = useState("")
   const [showWebcam, setShowWebcam] = useState(false)
-  const [facingMode, setFacingMode] = useState('environment') // 'user' or 'environment'
+  const [facingMode, setFacingMode] = useState('environment')
   const resultRef = useRef(null)
   const fileInputRef = useRef(null)
   const webcamRef = useRef(null)
@@ -67,8 +66,11 @@ function App() {
     setActiveTab('result')
     
     try {
-      //const res = await fetch("https://business-card-analyzer-backend.onrender.com/upload", {
-      const res = await fetch("http://localhost:8000/upload", {
+      const uploadUrl = window.location.hostname === 'localhost' 
+      ? "http://localhost:8000/upload" 
+      : "https://business-card-analyzer-backend.onrender.com/upload";
+    
+      const res = await fetch(uploadUrl , {
         method: "POST",
         body: formData,
       })
@@ -103,115 +105,60 @@ function App() {
     if (!response || response.includes("Error")) {
       return alert("No valid output results available");
     }
-    
+  
     setQrLoading(true);
   
     try {
-      // 1️⃣ html2canvasを使用してDOMを画像に変換
-      const canvas = await html2canvas(resultRef.current, {
-        scale: 2,
-        useCORS: true,
-        allowTaint: true,
-        backgroundColor: "#1f2937",
-        width: 800,
-        height: resultRef.current.scrollHeight,
-        scrollX: 0,
-        scrollY: 0
-      });
-
-      // 2️⃣ PDFインスタンス作成
-      const pdf = new jsPDF({
-        orientation: "portrait",
-        unit: "mm",
-        format: "a4"
-      });
-
-      // 3️⃣ キャンバスをPDFに追加
-      const pageWidth = pdf.internal.pageSize.getWidth();
-      const pageHeight = pdf.internal.pageSize.getHeight();
-      const canvasWidth = canvas.width;
-      const canvasHeight = canvas.height;
-      
-      const ratio = Math.min(pageWidth / canvasWidth, pageHeight / canvasHeight);
-      const scaledWidth = canvasWidth * ratio;
-      const scaledHeight = canvasHeight * ratio;
-      
-      const x = (pageWidth - scaledWidth) / 2;
-      const y = 0; // 上部マージン
-
-      pdf.addImage(
-        canvas.toDataURL('image/png'),
-        'PNG',
-        x,
-        y,
-        scaledWidth,
-        scaledHeight
-      );
-
-      const sf = pdf.internal.scaleFactor;              // px -> mm
-      const anchors = resultRef.current.querySelectorAll('a[href]');
-      anchors.forEach(a => {
-        const r = a.getBoundingClientRect();
-        const base = resultRef.current.getBoundingClientRect();
-        const relX = (r.left - base.left) * ratio;
-        const relY = (r.top  - base.top ) * ratio;
-        const w    = r.width  * ratio;
-        const h    = r.height * ratio;
-        pdf.link((x + relX) / sf, (y + relY) / sf, w / sf, h / sf, { url: a.href });
-      });
-
-      // 4️⃣ PDFをBlobとして生成
-      const blob = pdf.output("blob");
+      const element = resultRef.current;
+      if (!element) throw new Error("Result DOM not found");
+  
+      // PDF を Blob として生成（リンクやフォント含め見た目そのまま）
+      const pdfBlob = await html2pdf()
+        .set({
+          margin: 0,
+          filename: 'analysis_result.pdf',
+          image: { type: 'jpeg', quality: 0.98 },
+          html2canvas: {
+            scale: 2,
+            useCORS: true,
+            allowTaint: true,
+          },
+          jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' }
+        })
+        .from(element)
+        .outputPdf('blob');
+  
+      // Blob をアップロード
       const formData = new FormData();
-      formData.append("file", blob, "analysis_result.pdf");
-
-      // 5️⃣ アップロード先URLの設定
+      formData.append("file", pdfBlob, "analysis_result.pdf");
+  
       const uploadUrl = window.location.hostname === 'localhost' 
         ? "http://localhost:8000/upload-image" 
         : "https://business-card-analyzer-backend.onrender.com/upload-image";
-
-      // 6️⃣ PDFをアップロード
-      const uploadResponse = await fetch(uploadUrl, { 
-        method: "POST", 
-        body: formData 
-      });
-
-      if (!uploadResponse.ok) {
-        const errorText = await uploadResponse.text();
-        throw new Error(`Upload failed: ${uploadResponse.status} - ${errorText}`);
+  
+      const res = await fetch(uploadUrl, { method: "POST", body: formData });
+      if (!res.ok) throw new Error(`Upload failed: ${res.status}`);
+      const data = await res.json();
+  
+      if (!data.success || !data.download_url) {
+        throw new Error("Invalid backend response");
       }
-
-      const uploadData = await uploadResponse.json();
-      console.log("Upload response:", uploadData);
+  
+      // QRコード生成
+      const url = data.download_url;
+      setDownloadUrl(url);
       
-      if (!uploadData.success || !uploadData.download_url) {
-        throw new Error("Backend returned invalid response");
-      }
-
-      // 7️⃣ QRコード生成
-      const pdfDownloadUrl = uploadData.download_url;
-      setDownloadUrl(pdfDownloadUrl);
-      
-      const qrCodeDataUrl = await QRCode.toDataURL(pdfDownloadUrl, {
+      const qr = await QRCode.toDataURL(url, {
         width: 256,
         margin: 2,
-        color: {
-          dark: '#000000',
-          light: '#FFFFFF'
-        },
-        errorCorrectionLevel: 'M',
-        type: 'image/png',
-        quality: 0.92,
-        rendererOpts: {
-          quality: 0.92
-        }
+        color: { dark: '#000000', light: '#ffffff' },
+        errorCorrectionLevel: 'M'
       });
-      
-      setQrCodeUrl(qrCodeDataUrl);
-
-    } catch (error) {
-      console.error("PDF/QR generation error:", error);
-      alert("Error during PDF/QR generation: " + error.message);
+  
+      setQrCodeUrl(qr);
+    } catch (err) {
+      console.error("QR/PDF generation error:", err);
+      alert("Error during QR/PDF generation: " + err.message);
     } finally {
       setQrLoading(false);
     }
